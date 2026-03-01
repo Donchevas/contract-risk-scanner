@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Configuración de la aplicación cargada desde variables de entorno."""
 
-    gcp_project_id: str = "contract-risk-scanner"
+    gcp_project_id: str = "contract-risk-scanner-488718"
     gcs_bucket_name: str = "contract-risk-scanner-bucket"
     max_upload_mb: int = 20
 
@@ -16,3 +16,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
