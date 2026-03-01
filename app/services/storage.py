@@ -4,6 +4,7 @@ import json
 from typing import Any, Tuple
 
 from google.cloud import storage
+
 from app.config import get_settings
 
 
@@ -33,6 +34,14 @@ def gcs_blob_exists(gs_path: str) -> bool:
     return blob.exists(client)
 
 
+def download_bytes_from_gcs(gs_path: str) -> bytes:
+    bucket_name, blob_name = _parse_gs_path(gs_path)
+    client = _client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    return blob.download_as_bytes()
+
+
 def upload_json_to_gcs(gs_path: str, data: dict[str, Any]) -> None:
     bucket_name, blob_name = _parse_gs_path(gs_path)
 
@@ -42,3 +51,13 @@ def upload_json_to_gcs(gs_path: str, data: dict[str, Any]) -> None:
 
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     blob.upload_from_string(payload, content_type="application/json")
+
+
+def upload_text_to_gcs(gs_path: str, text: str) -> None:
+    bucket_name, blob_name = _parse_gs_path(gs_path)
+
+    client = _client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    blob.upload_from_string(text, content_type="text/plain; charset=utf-8")

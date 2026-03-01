@@ -3,26 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from app.config import get_settings
 from app.services.firestore import create_contract, create_job
 from app.services.gcs import upload_contract_pdf
-from app.services.job_runner import run_job_sync  # ✅ NUEVO
+
+# ✅ Importa el handler del job (NO run_job_logic)
 from app.routes.jobs import run_job
-
-from fastapi import BackgroundTasks
-from app.routes.jobs import run_job_logic
-
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
 
 @router.post("/upload")
-async def upload_contract(
-    background_tasks: BackgroundTasks,  # ✅ NUEVO
-    file: UploadFile = File(...),
-) -> dict[str, str | int | None]:
+async def upload_contract(file: UploadFile = File(...)) -> dict[str, str | int | None]:
     settings = get_settings()
 
     if not file.filename:
@@ -78,15 +72,14 @@ async def upload_contract(
         gcs_pdf_path=gcs_pdf_path,
     )
     create_job(job_id=job_id, contract_id=contract_id)
-    background_tasks.add_task(run_job_logic, job_id)
 
-    # ✅ AUTO-RUN del job (en segundo plano)
-    background_tasks.add_task(run_job_sync, job_id)
+    # ✅ Auto-run (Plan A)
+    auto_run_result = run_job(job_id)
 
     return {
         "contract_id": contract_id,
         "job_id": job_id,
-        "status": "PENDING",
+        "status": "DONE" if auto_run_result.get("ok") else "PENDING",
         "gcs_pdf_path": gcs_pdf_path,
-        "auto_run": True,  # opcional, pero útil para ver que quedó activo
+        "auto_run": 1,
     }

@@ -17,15 +17,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# -------------------------
-# Contracts
-# -------------------------
-def create_contract(
-    *,
-    contract_id: str,
-    filename: str,
-    gcs_pdf_path: str,
-) -> dict[str, Any]:
+def create_contract(*, contract_id: str, filename: str, gcs_pdf_path: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "filename": filename,
         "gcs_pdf_path": gcs_pdf_path,
@@ -39,16 +31,15 @@ def create_contract(
 def get_contract(contract_id: str) -> dict[str, Any] | None:
     client = get_firestore_client()
     snap = client.collection("contracts").document(contract_id).get()
+
     if not snap.exists:
         return None
+
     data = snap.to_dict() or {}
     data["contract_id"] = contract_id
     return data
 
 
-# -------------------------
-# Jobs
-# -------------------------
 def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "contract_id": contract_id,
@@ -59,6 +50,7 @@ def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
         "started_at": None,
         "finished_at": None,
         "result_gcs_json_path": None,
+        "result_gcs_txt_path": None,
         "report_gcs_pdf_path": None,
     }
     client = get_firestore_client()
@@ -69,8 +61,10 @@ def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
 def get_job(job_id: str) -> dict[str, Any] | None:
     client = get_firestore_client()
     snap = client.collection("jobs").document(job_id).get()
+
     if not snap.exists:
         return None
+
     data = snap.to_dict() or {}
     data["job_id"] = job_id
     return data
@@ -78,14 +72,7 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 
 def update_job(*, job_id: str, patch: dict[str, Any]) -> None:
     """
-    Actualiza SOLO los campos indicados (NO crea campo 'patch').
-    Si el documento no existe, lanza error (que es bueno para detectar inconsistencias).
+    Actualiza campos parciales del job (merge).
     """
-    # Soporte opcional por si usas "__now__" en algún punto
-    if patch.get("started_at") == "__now__":
-        patch["started_at"] = _utc_now_iso()
-    if patch.get("finished_at") == "__now__":
-        patch["finished_at"] = _utc_now_iso()
-
     client = get_firestore_client()
-    client.collection("jobs").document(job_id).update(patch)
+    client.collection("jobs").document(job_id).set(patch, merge=True)
