@@ -4,27 +4,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from google.cloud import firestore
+
 from app.config import get_settings
 
-
-def get_firestore_client() -> firestore.Client:
-    settings = get_settings()
-    return firestore.Client(project=settings.gcp_project_id)
-
-
-def get_contract(contract_id: str) -> dict[str, Any] | None:
-    client = get_firestore_client()
-    snap = client.collection("contracts").document(contract_id).get()
-    if not snap.exists:
-        return None
-    data = snap.to_dict() or {}
-    data["contract_id"] = contract_id
-    return data
-
-
-def update_job(job_id: str, patch: dict[str, Any]) -> None:
-    client = get_firestore_client()
-    client.collection("jobs").document(job_id).update(patch)
 
 def get_firestore_client() -> firestore.Client:
     settings = get_settings()
@@ -35,7 +17,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_contract(*, contract_id: str, filename: str, gcs_pdf_path: str) -> dict[str, Any]:
+# -------------------------
+# Contracts
+# -------------------------
+def create_contract(
+    *,
+    contract_id: str,
+    filename: str,
+    gcs_pdf_path: str,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "filename": filename,
         "gcs_pdf_path": gcs_pdf_path,
@@ -48,14 +38,17 @@ def create_contract(*, contract_id: str, filename: str, gcs_pdf_path: str) -> di
 
 def get_contract(contract_id: str) -> dict[str, Any] | None:
     client = get_firestore_client()
-    snapshot = client.collection("contracts").document(contract_id).get()
-    if not snapshot.exists:
+    snap = client.collection("contracts").document(contract_id).get()
+    if not snap.exists:
         return None
-    data = snapshot.to_dict() or {}
+    data = snap.to_dict() or {}
     data["contract_id"] = contract_id
     return data
 
 
+# -------------------------
+# Jobs
+# -------------------------
 def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "contract_id": contract_id,
@@ -75,24 +68,24 @@ def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
 
 def get_job(job_id: str) -> dict[str, Any] | None:
     client = get_firestore_client()
-    snapshot = client.collection("jobs").document(job_id).get()
-
-    if not snapshot.exists:
+    snap = client.collection("jobs").document(job_id).get()
+    if not snap.exists:
         return None
-
-    data = snapshot.to_dict() or {}
+    data = snap.to_dict() or {}
     data["job_id"] = job_id
     return data
 
 
-def update_job(job_id: str, **fields: Any) -> None:
+def update_job(*, job_id: str, patch: dict[str, Any]) -> None:
     """
-    Permite mandar started_at="__now__" o finished_at="__now__" para setear timestamps.
+    Actualiza SOLO los campos indicados (NO crea campo 'patch').
+    Si el documento no existe, lanza error (que es bueno para detectar inconsistencias).
     """
-    if fields.get("started_at") == "__now__":
-        fields["started_at"] = _utc_now_iso()
-    if fields.get("finished_at") == "__now__":
-        fields["finished_at"] = _utc_now_iso()
+    # Soporte opcional por si usas "__now__" en algún punto
+    if patch.get("started_at") == "__now__":
+        patch["started_at"] = _utc_now_iso()
+    if patch.get("finished_at") == "__now__":
+        patch["finished_at"] = _utc_now_iso()
 
     client = get_firestore_client()
-    client.collection("jobs").document(job_id).set(fields, merge=True)
+    client.collection("jobs").document(job_id).update(patch)
