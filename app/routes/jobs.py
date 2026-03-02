@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from app.services.firestore import get_job
-from app.services.job_runner import run_job_sync
+from app.services.job_runner import run_job_logic
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -20,8 +20,7 @@ def read_job(job_id: str) -> dict[str, Any]:
 
 @router.post("/{job_id}/run")
 def run_job(job_id: str) -> dict[str, Any]:
-    # Ejecuta la lógica real
     try:
-        return run_job_sync(job_id)
+        return run_job_logic(job_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile, status
 
 from app.config import get_settings
 from app.services.firestore import create_contract, create_job
 from app.services.gcs import upload_contract_pdf
-from app.services.job_runner import run_job_sync
+from app.services.job_runner import run_job_logic
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
@@ -17,6 +17,7 @@ router = APIRouter(prefix="/contracts", tags=["contracts"])
 async def upload_contract(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    auto_run: int = Form(1),
 ) -> dict[str, str | int | None]:
     settings = get_settings()
 
@@ -73,8 +74,9 @@ async def upload_contract(
     create_job(job_id=job_id, contract_id=contract_id)
 
     # ✅ AUTO-RUN (la lógica correcta, no el endpoint)
-    if getattr(settings, "auto_run_on_upload", True):
-        background_tasks.add_task(run_job_sync, job_id)
+    should_auto_run = auto_run == 1
+    if should_auto_run:
+        background_tasks.add_task(run_job_logic, job_id)
 
     return {
         "contract_id": contract_id,
