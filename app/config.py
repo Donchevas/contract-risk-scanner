@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     gcp_project_id: str = "contract-risk-scanner-488718"
     gcs_bucket_name: str = "contract-risk-scanner-bucket"
     max_upload_mb: int = 20
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
 
