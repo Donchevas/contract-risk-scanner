@@ -50,6 +50,10 @@ def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
         "result_gcs_json_path": None,
         "result_gcs_txt_path": None,
         "report_gcs_pdf_path": None,
+        "ai_result_gcs_json_path": None,
+        "ai_model": None,
+        "ai_status": "PENDING",
+        "ai_error": None,
     }
     client = get_firestore_client()
     client.collection("jobs").document(job_id).set(payload)

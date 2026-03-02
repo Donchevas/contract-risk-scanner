@@ -6,6 +6,7 @@ from io import BytesIO
 from typing import Any
 
 from app.config import get_settings
+from app.services.ai_analyzer import analyze_contract_with_ai
 from app.services.firestore import get_contract, get_job, update_job
 from app.services.storage import (
     download_bytes_from_gcs,
@@ -191,6 +192,35 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
         )
         upload_json_to_gcs(result_json_path, result)
 
+        ai_result_json_path: str | None = None
+        ai_status = "DONE"
+        ai_error: str | None = None
+
+        try:
+            _log(f"AI start job_id={job_id} model={settings.openai_model}")
+            ai_result = analyze_contract_with_ai(
+                contract_text=text,
+                rules_result=rules_result,
+                metadata={
+                    "job_id": job_id,
+                    "contract_id": contract_id,
+                    "source_pdf": gcs_pdf_path,
+                    "result_txt_path": result_txt_path,
+                    "result_json_path": result_json_path,
+                },
+            )
+            ai_result_json_path = (
+                f"gs://{settings.gcs_bucket_name}/results/"
+                f"{contract_id}/{job_id}/ai_result.json"
+            )
+            upload_json_to_gcs(ai_result_json_path, ai_result)
+            _log(f"AI done job_id={job_id} path={ai_result_json_path}")
+        except Exception as ai_exc:
+            ai_status = "FAILED"
+            ai_error = str(ai_exc)
+            logger.exception("AI failed job_id=%s err=%s", job_id, ai_exc)
+            _log(f"AI failed job_id={job_id} err={ai_exc}")
+
         # DONE
         update_job(
             job_id=job_id,
@@ -200,6 +230,10 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
                 "finished_at": _utc_now_iso(),
                 "result_gcs_json_path": result_json_path,
                 "result_gcs_txt_path": result_txt_path,
+                "ai_result_gcs_json_path": ai_result_json_path,
+                "ai_model": settings.openai_model,
+                "ai_status": ai_status,
+                "ai_error": ai_error,
             },
         )
 
@@ -210,6 +244,8 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
             "job_id": job_id,
             "result_gcs_json_path": result_json_path,
             "result_gcs_txt_path": result_txt_path,
+            "ai_result_gcs_json_path": ai_result_json_path,
+            "ai_status": ai_status,
             "mode": "RULES_V1",
         }
 
