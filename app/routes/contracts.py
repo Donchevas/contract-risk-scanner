@@ -3,20 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
 
 from app.config import get_settings
 from app.services.firestore import create_contract, create_job
 from app.services.gcs import upload_contract_pdf
-
-# ✅ Importa el handler del job (NO run_job_logic)
-from app.routes.jobs import run_job
+from app.services.job_runner import run_job_sync
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
 
 @router.post("/upload")
-async def upload_contract(file: UploadFile = File(...)) -> dict[str, str | int | None]:
+async def upload_contract(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+) -> dict[str, str | int | None]:
     settings = get_settings()
 
     if not file.filename:
@@ -52,9 +53,7 @@ async def upload_contract(file: UploadFile = File(...)) -> dict[str, str | int |
     if size_bytes > max_size_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"El archivo supera el tamaño máximo permitido de {settings.max_upload_mb}MB."
-            ),
+            detail=f"El archivo supera el tamaño máximo permitido de {settings.max_upload_mb}MB.",
         )
 
     contract_id = str(uuid4())
@@ -73,13 +72,13 @@ async def upload_contract(file: UploadFile = File(...)) -> dict[str, str | int |
     )
     create_job(job_id=job_id, contract_id=contract_id)
 
-    # ✅ Auto-run (Plan A)
-    auto_run_result = run_job(job_id)
+    # ✅ AUTO-RUN (la lógica correcta, no el endpoint)
+    if getattr(settings, "auto_run_on_upload", True):
+        background_tasks.add_task(run_job_sync, job_id)
 
     return {
         "contract_id": contract_id,
         "job_id": job_id,
-        "status": "DONE" if auto_run_result.get("ok") else "PENDING",
+        "status": "PENDING",
         "gcs_pdf_path": gcs_pdf_path,
-        "auto_run": 1,
     }

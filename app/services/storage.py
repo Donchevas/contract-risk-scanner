@@ -39,7 +39,23 @@ def download_bytes_from_gcs(gs_path: str) -> bytes:
     client = _client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
+
+    if not blob.exists(client):
+        raise FileNotFoundError(f"GCS object not found: {gs_path}")
+
     return blob.download_as_bytes()
+
+
+def download_text_from_gcs(gs_path: str) -> str:
+    bucket_name, blob_name = _parse_gs_path(gs_path)
+    client = _client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    if not blob.exists(client):
+        raise FileNotFoundError(f"GCS object not found: {gs_path}")
+
+    return blob.download_as_text(encoding="utf-8")
 
 
 def upload_json_to_gcs(gs_path: str, data: dict[str, Any]) -> None:
