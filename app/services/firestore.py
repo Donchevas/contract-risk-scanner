@@ -38,7 +38,7 @@ def get_contract(contract_id: str) -> dict[str, Any] | None:
     return data
 
 
-def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
+def create_job(*, job_id: str, contract_id: str, ruleset: str = "RULES_V1") -> dict[str, Any]:
     payload: dict[str, Any] = {
         "contract_id": contract_id,
         "status": "PENDING",
@@ -54,6 +54,7 @@ def create_job(*, job_id: str, contract_id: str) -> dict[str, Any]:
         "ai_model": None,
         "ai_status": "PENDING",
         "ai_error": None,
+        "ruleset": ruleset,
     }
     client = get_firestore_client()
     client.collection("jobs").document(job_id).set(payload)
