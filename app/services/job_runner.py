@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any
+
+from pypdf import PdfReader
 
 from app.config import get_settings
 from app.services.ai_analyzer import analyze_contract_with_ai
@@ -18,180 +21,131 @@ from app.services.storage import (
 logger = logging.getLogger(__name__)
 
 
-def _log(message: str) -> None:
-    print(message, flush=True)
-    logger.info(message)
-
-
-RULES_V1: list[dict[str, str]] = [
-    {
-        "id": "AUTO_RENEWAL",
-        "severity": "high",
-        "pattern": "automatic renewal",
-        "description": "El contrato menciona renovación automática.",
-    },
-    {
-        "id": "UNILATERAL_TERMINATION",
-        "severity": "high",
-        "pattern": "sole discretion",
-        "description": "Existe terminación o modificación unilateral.",
-    },
-    {
-        "id": "LIABILITY_LIMITATION",
-        "severity": "medium",
-        "pattern": "limitation of liability",
-        "description": "Se detecta cláusula de limitación de responsabilidad.",
-    },
-    {
-        "id": "CONFIDENTIALITY",
-        "severity": "low",
-        "pattern": "confidential",
-        "description": "Se detecta cláusula de confidencialidad.",
-    },
-]
-
-
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _extract_pdf_text_selectable(pdf_bytes: bytes) -> str:
-    """
-    Extrae texto de PDF seleccionable (sin OCR).
-    Requiere pypdf.
-    """
-    try:
-        from pypdf import PdfReader  # type: ignore
-    except Exception as e:
-        raise RuntimeError("Falta dependencia para leer PDFs. Instala: pip install pypdf") from e
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+    logger.info(msg)
 
+
+def _extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     reader = PdfReader(BytesIO(pdf_bytes))
     parts: list[str] = []
     for page in reader.pages:
-        txt = page.extract_text() or ""
-        if txt.strip():
-            parts.append(txt)
+        t = page.extract_text() or ""
+        if t.strip():
+            parts.append(t)
     return "\n\n".join(parts).strip()
 
 
-def _run_rules_v1(text: str) -> dict[str, Any]:
-    text_lower = text.lower()
-    findings: list[dict[str, str]] = []
-    for rule in RULES_V1:
-        if rule["pattern"] in text_lower:
+def _snippets(text: str, pattern: str, max_snips: int = 6, radius: int = 120) -> list[str]:
+    snips: list[str] = []
+    for m in re.finditer(pattern, text, flags=re.IGNORECASE | re.MULTILINE):
+        start = max(0, m.start() - radius)
+        end = min(len(text), m.end() + radius)
+        snips.append(text[start:end].replace("\n", " ").strip())
+        if len(snips) >= max_snips:
+            break
+    return snips
+
+
+def _rules_v1(text: str) -> dict[str, Any]:
+    """
+    Reglas deterministicas simples (en español) para tu fase 1/2.
+    Esto se puede sofisticar luego, pero ya te da señales tipo semaforo.
+    """
+    findings: list[dict[str, Any]] = []
+
+    rules = [
+        ("penalties", r"\bpenalidad(?:es)?\b|\bmulta(?:s)?\b", "HIGH"),
+        ("lucro_cesante", r"\blucro\s+cesante\b|\bdaño\s+emergente\b", "HIGH"),
+        ("liens_or_mortgage", r"\bhipoteca\b|\bembargo\b|\bgravamen(?:es)?\b|\bcargas\b", "MEDIUM"),
+        ("arbitration", r"\barbitraje\b|\bcentro\s+de\s+arbitraje\b", "LOW"),
+        ("jurisdiction", r"\bjurisdicci[oó]n\b|\btribunales\b|\bjueces\b", "LOW"),
+        ("renewal", r"\brenovaci[oó]n\s+autom[aá]tica\b|\bpr[oó]rroga\b", "MEDIUM"),
+        ("termination", r"\bresoluci[oó]n\b|\bterminaci[oó]n\b|\brescisi[oó]n\b", "MEDIUM"),
+    ]
+
+    score = 0
+    for key, pat, sev in rules:
+        snips = _snippets(text, pat)
+        if snips:
             findings.append(
                 {
-                    "rule_id": rule["id"],
-                    "severity": rule["severity"],
-                    "description": rule["description"],
-                    "pattern": rule["pattern"],
+                    "rule_id": key,
+                    "severity": sev,
+                    "count": len(snips),
+                    "snippets": snips,
                 }
             )
+            score += {"LOW": 5, "MEDIUM": 15, "HIGH": 30}[sev]
 
-    risk_score = min(100, len(findings) * 25)
-    risk_level = "LOW"
-    if risk_score >= 75:
-        risk_level = "HIGH"
-    elif risk_score >= 40:
-        risk_level = "MEDIUM"
+    score = min(100, score)
+    level = "LOW" if score < 20 else "MEDIUM" if score < 60 else "HIGH"
 
     return {
         "ruleset": "RULES_V1",
         "summary": {
             "total_findings": len(findings),
-            "risk_score": risk_score,
-            "risk_level": risk_level,
+            "risk_score": score,
+            "risk_level": level,
         },
         "findings": findings,
     }
 
 
-def _make_ai_excerpt(full_text: str, max_chars: int) -> tuple[str, bool]:
-    """
-    Devuelve (excerpt, truncated).
-    Mantiene inicio y final para mejor contexto (muchas cláusulas están al final).
-    """
-    t = full_text.strip()
-    if len(t) <= max_chars:
-        return t, False
-
-    head = int(max_chars * 0.65)
-    tail = max_chars - head
-    excerpt = t[:head].rstrip() + "\n\n...[TRUNCATED]...\n\n" + t[-tail:].lstrip()
-    return excerpt, True
-
-
 def run_job_logic(job_id: str) -> dict[str, Any]:
-    """
-    Runner síncrono (ideal para BackgroundTasks en local).
-    Más adelante lo movemos a Cloud Tasks/worker sin cambiar contratos.
-    """
     settings = get_settings()
-
-    # Fallback por si aún no agregas este setting: usamos 40k chars para IA
-    ai_max_chars = int(getattr(settings, "openai_max_input_chars", 40000) or 40000)
-
-    _log(f"[job:{job_id}] Starting execution")
 
     job = get_job(job_id)
     if not job:
-        _log(f"[job:{job_id}] Job not found")
-        raise RuntimeError("Job not found")
+        raise ValueError(f"Job not found: {job_id}")
 
     contract_id = job.get("contract_id")
     if not contract_id:
-        _log(f"[job:{job_id}] Missing contract_id")
-        raise RuntimeError("Job missing contract_id")
+        raise ValueError(f"Job missing contract_id: {job_id}")
 
     contract = get_contract(contract_id)
     if not contract:
-        _log(f"[job:{job_id}] Contract {contract_id} not found")
-        raise RuntimeError("Contract not found")
+        raise ValueError(f"Contract not found: {contract_id}")
 
-    # RUNNING
     update_job(
         job_id=job_id,
         patch={
             "status": "RUNNING",
-            "started_at": _utc_now_iso(),
-            "finished_at": None,
-            "error": None,
             "progress": 10,
+            "started_at": _utc_now_iso(),
+            "error": None,
         },
     )
+
+    _log(f"[job:{job_id}] Starting execution")
 
     try:
         gcs_pdf_path = contract.get("gcs_pdf_path")
         if not gcs_pdf_path:
-            _log(f"[job:{job_id}] Contract {contract_id} missing gcs_pdf_path")
             raise RuntimeError("Contract missing gcs_pdf_path")
 
         if not gcs_blob_exists(gcs_pdf_path):
-            _log(f"[job:{job_id}] PDF not found in GCS: {gcs_pdf_path}")
             raise RuntimeError(f"PDF not found in GCS: {gcs_pdf_path}")
 
         update_job(job_id=job_id, patch={"progress": 25})
 
         pdf_bytes = download_bytes_from_gcs(gcs_pdf_path)
-        update_job(job_id=job_id, patch={"progress": 45})
-
-        # Texto completo (sin OCR)
-        text = _extract_pdf_text_selectable(pdf_bytes)
+        text = _extract_text_from_pdf_bytes(pdf_bytes)
         if not text.strip():
-            raise RuntimeError("No se pudo extraer texto del PDF (¿está escaneado?)")
+            raise RuntimeError("No se pudo extraer texto del PDF (texto vacio).")
 
-        update_job(job_id=job_id, patch={"progress": 65})
-
-        # Guardamos TXT completo en GCS
-        result_txt_path = (
-            f"gs://{settings.gcs_bucket_name}/results/"
-            f"{contract_id}/{job_id}/result.txt"
-        )
+        # Guardar txt
+        result_txt_path = f"gs://{settings.gcs_bucket_name}/results/{contract_id}/{job_id}/result.txt"
         upload_text_to_gcs(result_txt_path, text)
 
-        update_job(job_id=job_id, patch={"progress": 80})
+        update_job(job_id=job_id, patch={"progress": 55})
 
-        rules_result = _run_rules_v1(text)
+        # RULES_V1
+        rules_result = _rules_v1(text)
 
         result = {
             "contract_id": contract_id,
@@ -203,21 +157,36 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
             "created_at": _utc_now_iso(),
         }
 
-        result_json_path = (
-            f"gs://{settings.gcs_bucket_name}/results/"
-            f"{contract_id}/{job_id}/result.json"
-        )
+        result_json_path = f"gs://{settings.gcs_bucket_name}/results/{contract_id}/{job_id}/result.json"
         upload_json_to_gcs(result_json_path, result)
 
-        # ---------- IA (AI_V1) ----------
+        update_job(job_id=job_id, patch={"progress": 80})
+
+        # IA (opcional): si falla, el job igual queda DONE y solo ai_status=FAILED
         ai_result_json_path: str | None = None
-        ai_status = "DONE"
+        ai_status = "PENDING"
         ai_error: str | None = None
 
-        excerpt, truncated = _make_ai_excerpt(text, ai_max_chars)
+        excerpt = text
+        truncated = False
+        max_chars = 12000
+        if len(excerpt) > max_chars:
+            excerpt = excerpt[:max_chars]
+            truncated = True
 
         try:
+            ai_status = "RUNNING"
+            update_job(
+                job_id=job_id,
+                patch={
+                    "ai_status": ai_status,
+                    "ai_error": None,
+                    "ai_model": settings.openai_model,
+                },
+            )
+
             _log(f"[job:{job_id}] AI start model={settings.openai_model} truncated={truncated} chars={len(excerpt)}")
+
             ai_result = analyze_contract_with_ai(
                 contract_text=excerpt,
                 rules_result=rules_result,
@@ -227,24 +196,40 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
                     "source_pdf": gcs_pdf_path,
                     "result_txt_path": result_txt_path,
                     "result_json_path": result_json_path,
-                    "ai_input_chars": len(excerpt),
-                    "ai_input_truncated": truncated,
-                    "ai_full_text_chars": len(text),
+                    "truncated": truncated,
                 },
             )
-            ai_result_json_path = (
-                f"gs://{settings.gcs_bucket_name}/results/"
-                f"{contract_id}/{job_id}/ai_result.json"
-            )
-            upload_json_to_gcs(ai_result_json_path, ai_result)
-            _log(f"[job:{job_id}] AI done path={ai_result_json_path}")
-        except Exception as ai_exc:
-            ai_status = "FAILED"
-            ai_error = str(ai_exc)
-            logger.exception("[job:%s] AI failed err=%s", job_id, ai_exc)
-            _log(f"[job:{job_id}] AI failed err={ai_exc}")
 
-        # DONE (aunque IA falle)
+            ai_result_json_path = f"gs://{settings.gcs_bucket_name}/results/{contract_id}/{job_id}/ai_result.json"
+            upload_json_to_gcs(ai_result_json_path, ai_result)
+
+            ai_status = "DONE"
+            update_job(
+                job_id=job_id,
+                patch={
+                    "ai_status": ai_status,
+                    "ai_error": None,
+                    "ai_result_gcs_json_path": ai_result_json_path,
+                    "ai_model": settings.openai_model,
+                },
+            )
+
+            _log(f"[job:{job_id}] AI done path={ai_result_json_path}")
+
+        except Exception as exc:
+            ai_status = "FAILED"
+            ai_error = str(exc)
+            update_job(
+                job_id=job_id,
+                patch={
+                    "ai_status": ai_status,
+                    "ai_error": ai_error,
+                    "ai_model": settings.openai_model,
+                },
+            )
+            _log(f"[job:{job_id}] AI failed err={exc}")
+
+        # DONE (job principal)
         update_job(
             job_id=job_id,
             patch={
@@ -254,13 +239,15 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
                 "result_gcs_json_path": result_json_path,
                 "result_gcs_txt_path": result_txt_path,
                 "ai_result_gcs_json_path": ai_result_json_path,
-                "ai_model": settings.openai_model,
                 "ai_status": ai_status,
                 "ai_error": ai_error,
+                "ai_model": settings.openai_model,
             },
         )
 
-        _log(f"[job:{job_id}] Completed. txt={result_txt_path} json={result_json_path} ai={ai_status}")
+        _log(
+            f"[job:{job_id}] Completed. txt={result_txt_path} json={result_json_path} ai={ai_status}"
+        )
 
         return {
             "ok": True,
@@ -273,8 +260,6 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
         }
 
     except Exception as e:
-        logger.exception("[job:%s] Failed with error: %s", job_id, e)
-        _log(f"[job:{job_id}] Failed with error: {e}")
         update_job(
             job_id=job_id,
             patch={
@@ -283,6 +268,7 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
                 "finished_at": _utc_now_iso(),
             },
         )
+        _log(f"[job:{job_id}] Failed err={e}")
         raise
 
 

@@ -7,11 +7,11 @@ from openai import OpenAI
 
 from app.config import get_settings
 
+
 SYSTEM_PROMPT = (
     "Eres un analista legal de contratos empresariales. "
-    "Debes responder exclusivamente con JSON válido, sin markdown, "
-    "siguiendo exactamente el schema solicitado. "
-    "No inventes hechos fuera del texto."
+    "Devuelve exclusivamente JSON válido (sin markdown, sin texto extra). "
+    "No inventes hechos: todo debe estar sustentado en contract_text."
 )
 
 
@@ -23,21 +23,17 @@ def analyze_contract_with_ai(
 ) -> dict[str, Any]:
     settings = get_settings()
 
-    # Con pydantic-settings, normalmente OPENAI_API_KEY mapea a openai_api_key
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY no está configurado")
+    # Mensaje ASCII (evita problemas de encoding tipo 'estÃ¡')
+    if not (settings.openai_api_key or "").strip():
+        raise RuntimeError("OPENAI_API_KEY no esta configurado")
 
-    client = OpenAI(
-        api_key=settings.openai_api_key,
-        max_retries=2,
-        timeout=60.0,
-    )
+    client = OpenAI(api_key=settings.openai_api_key)
 
     schema_guide = {
         "ruleset": "RULES_V1",
         "ai_version": "AI_V1",
         "summary": {
-            "executive_summary": "string (8-12 líneas)",
+            "executive_summary": "string (8-12 lineas, claro y ejecutivo)",
             "overall_risk_level": "LOW|MEDIUM|HIGH",
             "overall_risk_score": "0-100 (entero)",
         },
@@ -48,7 +44,7 @@ def analyze_contract_with_ai(
                 "title": "string",
                 "explanation": "string",
                 "recommended_action": "string",
-                "evidence": ["snippet real del contrato <=200 chars"],
+                "evidence": ["snippet <=200 chars (texto literal del contrato)"],
             }
         ],
         "negotiation_points": [
@@ -63,15 +59,15 @@ def analyze_contract_with_ai(
 
     user_prompt = (
         "Analiza el contrato usando contract_text + rules_result.\n"
-        "La respuesta DEBE ser JSON válido y nada más.\n\n"
         "Reglas obligatorias:\n"
-        "1) Usa ruleset='RULES_V1' y ai_version='AI_V1'.\n"
-        "2) executive_summary debe tener 8-12 líneas en texto claro.\n"
-        "3) overall_risk_level: LOW|MEDIUM|HIGH y overall_risk_score: entero 0-100.\n"
-        "4) key_risks debe incluir evidencia textual REAL tomada del contrato (snippets <=200 chars).\n"
-        "5) Si no hay riesgos, devuelve listas vacías en key_risks, negotiation_points y missing_or_ambiguous.\n"
-        "6) No inventes hechos fuera del texto.\n\n"
-        f"Schema esperado (guía):\n{json.dumps(schema_guide, ensure_ascii=False, indent=2)}\n\n"
+        "1) Responde SOLO JSON valido.\n"
+        "2) Usa ruleset='RULES_V1' y ai_version='AI_V1'.\n"
+        "3) executive_summary: 8-12 lineas.\n"
+        "4) overall_risk_level: LOW|MEDIUM|HIGH y overall_risk_score: entero 0-100.\n"
+        "5) key_risks: evidencia real del contrato (snippets <=200 chars).\n"
+        "6) Si no hay riesgos, listas vacias y summary coherente.\n"
+        "7) No inventes nada fuera del texto.\n\n"
+        f"Schema guia:\n{json.dumps(schema_guide, ensure_ascii=False, indent=2)}\n\n"
         f"Metadata:\n{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"
         f"rules_result:\n{json.dumps(rules_result, ensure_ascii=False, indent=2)}\n\n"
         f"contract_text:\n{contract_text}"
@@ -87,24 +83,18 @@ def analyze_contract_with_ai(
         ],
     )
 
-    content = resp.choices[0].message.content
+    content = (resp.choices[0].message.content or "").strip()
     if not content:
-        raise RuntimeError("OpenAI devolvió respuesta vacía")
+        raise RuntimeError("OpenAI devolvio respuesta vacia")
 
     try:
-        parsed = json.loads(content)
+        data = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("OpenAI no devolvió JSON válido") from exc
+        raise RuntimeError("OpenAI no devolvio JSON valido") from exc
 
-    if not isinstance(parsed, dict):
+    if not isinstance(data, dict):
         raise RuntimeError("La salida IA no es un objeto JSON")
 
-    # Defaults defensivos
-    parsed.setdefault("ruleset", "RULES_V1")
-    parsed.setdefault("ai_version", "AI_V1")
-    parsed.setdefault("key_risks", [])
-    parsed.setdefault("negotiation_points", [])
-    parsed.setdefault("missing_or_ambiguous", [])
-    parsed.setdefault("summary", {})
-
-    return parsed
+    data.setdefault("ruleset", "RULES_V1")
+    data.setdefault("ai_version", "AI_V1")
+    return data
