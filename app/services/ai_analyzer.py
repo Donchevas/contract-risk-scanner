@@ -10,24 +10,36 @@ from app.config import get_settings
 SYSTEM_PROMPT = (
     "Eres un analista legal de contratos empresariales. "
     "Debes responder exclusivamente con JSON válido, sin markdown, "
-    "siguiendo exactamente el schema solicitado."
+    "siguiendo exactamente el schema solicitado. "
+    "No inventes hechos fuera del texto."
 )
 
 
-def analyze_contract_with_ai(*, contract_text: str, rules_result: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+def analyze_contract_with_ai(
+    *,
+    contract_text: str,
+    rules_result: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
     settings = get_settings()
+
+    # Con pydantic-settings, normalmente OPENAI_API_KEY mapea a openai_api_key
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY no está configurado")
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = OpenAI(
+        api_key=settings.openai_api_key,
+        max_retries=2,
+        timeout=60.0,
+    )
 
-    schema_text = {
+    schema_guide = {
         "ruleset": "RULES_V1",
         "ai_version": "AI_V1",
         "summary": {
             "executive_summary": "string (8-12 líneas)",
             "overall_risk_level": "LOW|MEDIUM|HIGH",
-            "overall_risk_score": "0-100",
+            "overall_risk_score": "0-100 (entero)",
         },
         "key_risks": [
             {
@@ -36,7 +48,7 @@ def analyze_contract_with_ai(*, contract_text: str, rules_result: dict[str, Any]
                 "title": "string",
                 "explanation": "string",
                 "recommended_action": "string",
-                "evidence": ["short quote/snippet <=200 chars"],
+                "evidence": ["snippet real del contrato <=200 chars"],
             }
         ],
         "negotiation_points": [
@@ -50,22 +62,22 @@ def analyze_contract_with_ai(*, contract_text: str, rules_result: dict[str, Any]
     }
 
     user_prompt = (
-        "Analiza el contrato usando contract_text + rules_result. "
+        "Analiza el contrato usando contract_text + rules_result.\n"
         "La respuesta DEBE ser JSON válido y nada más.\n\n"
         "Reglas obligatorias:\n"
         "1) Usa ruleset='RULES_V1' y ai_version='AI_V1'.\n"
         "2) executive_summary debe tener 8-12 líneas en texto claro.\n"
         "3) overall_risk_level: LOW|MEDIUM|HIGH y overall_risk_score: entero 0-100.\n"
-        "4) key_risks debe incluir evidencia textual real tomada del contrato (snippets <=200 chars).\n"
-        "5) Si no hay riesgos, devuelve key_risks, negotiation_points y missing_or_ambiguous como listas vacías y summary coherente.\n"
+        "4) key_risks debe incluir evidencia textual REAL tomada del contrato (snippets <=200 chars).\n"
+        "5) Si no hay riesgos, devuelve listas vacías en key_risks, negotiation_points y missing_or_ambiguous.\n"
         "6) No inventes hechos fuera del texto.\n\n"
-        f"Schema esperado (guía de tipos):\n{json.dumps(schema_text, ensure_ascii=False, indent=2)}\n\n"
+        f"Schema esperado (guía):\n{json.dumps(schema_guide, ensure_ascii=False, indent=2)}\n\n"
         f"Metadata:\n{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"
         f"rules_result:\n{json.dumps(rules_result, ensure_ascii=False, indent=2)}\n\n"
         f"contract_text:\n{contract_text}"
     )
 
-    response = client.chat.completions.create(
+    resp = client.chat.completions.create(
         model=settings.openai_model,
         temperature=0.2,
         response_format={"type": "json_object"},
@@ -75,7 +87,7 @@ def analyze_contract_with_ai(*, contract_text: str, rules_result: dict[str, Any]
         ],
     )
 
-    content = response.choices[0].message.content
+    content = resp.choices[0].message.content
     if not content:
         raise RuntimeError("OpenAI devolvió respuesta vacía")
 
@@ -87,7 +99,12 @@ def analyze_contract_with_ai(*, contract_text: str, rules_result: dict[str, Any]
     if not isinstance(parsed, dict):
         raise RuntimeError("La salida IA no es un objeto JSON")
 
+    # Defaults defensivos
     parsed.setdefault("ruleset", "RULES_V1")
     parsed.setdefault("ai_version", "AI_V1")
+    parsed.setdefault("key_risks", [])
+    parsed.setdefault("negotiation_points", [])
+    parsed.setdefault("missing_or_ambiguous", [])
+    parsed.setdefault("summary", {})
 
     return parsed

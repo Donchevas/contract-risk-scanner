@@ -17,6 +17,7 @@ from app.services.storage import (
 
 logger = logging.getLogger(__name__)
 
+
 def _log(message: str) -> None:
     print(message, flush=True)
     logger.info(message)
@@ -62,9 +63,7 @@ def _extract_pdf_text_selectable(pdf_bytes: bytes) -> str:
     try:
         from pypdf import PdfReader  # type: ignore
     except Exception as e:
-        raise RuntimeError(
-            "Falta dependencia para leer PDFs. Instala: pip install pypdf"
-        ) from e
+        raise RuntimeError("Falta dependencia para leer PDFs. Instala: pip install pypdf") from e
 
     reader = PdfReader(BytesIO(pdf_bytes))
     parts: list[str] = []
@@ -107,12 +106,30 @@ def _run_rules_v1(text: str) -> dict[str, Any]:
     }
 
 
+def _make_ai_excerpt(full_text: str, max_chars: int) -> tuple[str, bool]:
+    """
+    Devuelve (excerpt, truncated).
+    Mantiene inicio y final para mejor contexto (muchas cláusulas están al final).
+    """
+    t = full_text.strip()
+    if len(t) <= max_chars:
+        return t, False
+
+    head = int(max_chars * 0.65)
+    tail = max_chars - head
+    excerpt = t[:head].rstrip() + "\n\n...[TRUNCATED]...\n\n" + t[-tail:].lstrip()
+    return excerpt, True
+
+
 def run_job_logic(job_id: str) -> dict[str, Any]:
     """
     Runner síncrono (ideal para BackgroundTasks en local).
     Más adelante lo movemos a Cloud Tasks/worker sin cambiar contratos.
     """
     settings = get_settings()
+
+    # Fallback por si aún no agregas este setting: usamos 40k chars para IA
+    ai_max_chars = int(getattr(settings, "openai_max_input_chars", 40000) or 40000)
 
     _log(f"[job:{job_id}] Starting execution")
 
@@ -192,14 +209,17 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
         )
         upload_json_to_gcs(result_json_path, result)
 
+        # ---------- IA (AI_V1) ----------
         ai_result_json_path: str | None = None
         ai_status = "DONE"
         ai_error: str | None = None
 
+        excerpt, truncated = _make_ai_excerpt(text, ai_max_chars)
+
         try:
-            _log(f"AI start job_id={job_id} model={settings.openai_model}")
+            _log(f"[job:{job_id}] AI start model={settings.openai_model} truncated={truncated} chars={len(excerpt)}")
             ai_result = analyze_contract_with_ai(
-                contract_text=text,
+                contract_text=excerpt,
                 rules_result=rules_result,
                 metadata={
                     "job_id": job_id,
@@ -207,6 +227,9 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
                     "source_pdf": gcs_pdf_path,
                     "result_txt_path": result_txt_path,
                     "result_json_path": result_json_path,
+                    "ai_input_chars": len(excerpt),
+                    "ai_input_truncated": truncated,
+                    "ai_full_text_chars": len(text),
                 },
             )
             ai_result_json_path = (
@@ -214,14 +237,14 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
                 f"{contract_id}/{job_id}/ai_result.json"
             )
             upload_json_to_gcs(ai_result_json_path, ai_result)
-            _log(f"AI done job_id={job_id} path={ai_result_json_path}")
+            _log(f"[job:{job_id}] AI done path={ai_result_json_path}")
         except Exception as ai_exc:
             ai_status = "FAILED"
             ai_error = str(ai_exc)
-            logger.exception("AI failed job_id=%s err=%s", job_id, ai_exc)
-            _log(f"AI failed job_id={job_id} err={ai_exc}")
+            logger.exception("[job:%s] AI failed err=%s", job_id, ai_exc)
+            _log(f"[job:{job_id}] AI failed err={ai_exc}")
 
-        # DONE
+        # DONE (aunque IA falle)
         update_job(
             job_id=job_id,
             patch={
@@ -237,7 +260,7 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
             },
         )
 
-        _log(f"[job:{job_id}] Completed successfully. txt={result_txt_path} json={result_json_path}")
+        _log(f"[job:{job_id}] Completed. txt={result_txt_path} json={result_json_path} ai={ai_status}")
 
         return {
             "ok": True,
