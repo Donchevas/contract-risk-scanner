@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile, status
 
 from app.config import get_settings
 from app.services.firestore import create_contract, create_job
@@ -18,6 +18,7 @@ async def upload_contract(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     auto_run: int = Form(1),
+    ruleset: str = Query("RULES_V1"),
 ) -> dict[str, str | int | None]:
     settings = get_settings()
 
@@ -57,6 +58,12 @@ async def upload_contract(
             detail=f"El archivo supera el tamaño máximo permitido de {settings.max_upload_mb}MB.",
         )
 
+    if ruleset not in {"RULES_V1", "RULES_V2_SERVICES"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ruleset inválido. Usa RULES_V1 o RULES_V2_SERVICES.",
+        )
+
     contract_id = str(uuid4())
     job_id = str(uuid4())
 
@@ -71,7 +78,7 @@ async def upload_contract(
         filename=file.filename,
         gcs_pdf_path=gcs_pdf_path,
     )
-    create_job(job_id=job_id, contract_id=contract_id)
+    create_job(job_id=job_id, contract_id=contract_id, ruleset=ruleset)
 
     # ✅ AUTO-RUN (la lógica correcta, no el endpoint)
     should_auto_run = auto_run == 1

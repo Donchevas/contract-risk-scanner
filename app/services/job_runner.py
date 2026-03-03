@@ -11,6 +11,7 @@ from pypdf import PdfReader
 from app.config import get_settings
 from app.services.ai_analyzer import analyze_contract_with_ai
 from app.services.firestore import get_contract, get_job, update_job
+from app.services.rules_v2_services import analyze_services_rules
 from app.services.storage import (
     download_bytes_from_gcs,
     gcs_blob_exists,
@@ -144,14 +145,23 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
 
         update_job(job_id=job_id, patch={"progress": 55})
 
-        # RULES_V1
-        rules_result = _rules_v1(text)
+        ruleset = str(job.get("ruleset") or "RULES_V1")
+        if ruleset not in {"RULES_V1", "RULES_V2_SERVICES"}:
+            _log(f"[job:{job_id}] Unknown ruleset={ruleset}; fallback to RULES_V1")
+            ruleset = "RULES_V1"
+
+        _log(f"[job:{job_id}] Using ruleset={ruleset}")
+
+        if ruleset == "RULES_V2_SERVICES":
+            rules_result = analyze_services_rules(text)
+        else:
+            rules_result = _rules_v1(text)
 
         result = {
             "contract_id": contract_id,
             "job_id": job_id,
             "source_pdf": gcs_pdf_path,
-            "mode": "RULES_V1",
+            "mode": ruleset,
             "analysis": rules_result,
             "text_chars": len(text),
             "created_at": _utc_now_iso(),
@@ -256,7 +266,7 @@ def run_job_logic(job_id: str) -> dict[str, Any]:
             "result_gcs_txt_path": result_txt_path,
             "ai_result_gcs_json_path": ai_result_json_path,
             "ai_status": ai_status,
-            "mode": "RULES_V1",
+            "mode": ruleset,
         }
 
     except Exception as e:
